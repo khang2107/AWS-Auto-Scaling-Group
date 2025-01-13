@@ -1,0 +1,316 @@
+# This is template v2 as:
+# the scale down policy removes 1 instance if CPU < 40% for 10s
+# the scale up policy adds 1 instance if CPU > 50% for 10s
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: This template will create a three-tier web application. All of the
+    tasks listed below will be completed in a template. Create a VPC with a CIDR
+    block of 10.10.0.0/16 Create three public subnets with 10.10.1.0/24 &
+    10.10.2.0/24 & 10.10.3.0/24 Create an autoscaling group using . All instances should have apache installed with a Public IP
+    address. The autoscaling min and max should be 2 and 5. Create an Application
+    Load Balancer to distribute traffic to the autoscaling group. Create a web
+    server security group that allows inbound traffic from HTTP from your
+    Application Load Balancer. Create a load balancer security group that allows
+    inbound traffic from HTTP from 0.0.0.0/0. Add a target policy for the ASG to
+    scale after CPU utilization is above 50% Find a stress tool to be able to
+    stress an instance above 50%.
+
+Parameters:
+    LatestAmiId:
+        Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+        Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+
+Resources:
+    # Create main VPC
+    MainVPC:
+        Type: AWS::EC2::VPC
+        Properties:
+            CidrBlock: 10.10.0.0/16
+            EnableDnsSupport: true
+            EnableDnsHostnames: true
+            Tags:
+                - Key: Name
+                  Value: khang-LambdaCldWebApp-mainVPC
+
+    # Create Public Subnet 1
+    PublicSubnet1:
+        Type: AWS::EC2::Subnet
+        Properties:
+            VpcId: !Ref MainVPC
+            AvailabilityZone: ap-southeast-2a
+            CidrBlock: 10.10.1.0/24
+            MapPublicIpOnLaunch: true
+            Tags:
+                - Key: Name
+                  Value: khang-LambdaCldWebApp-PublicSubnet1
+
+    # Create Public Subnet 2
+    PublicSubnet2:
+        Type: AWS::EC2::Subnet
+        Properties:
+            VpcId: !Ref MainVPC
+            AvailabilityZone: ap-southeast-2b
+            CidrBlock: 10.10.2.0/24
+            MapPublicIpOnLaunch: true
+            Tags:
+                - Key: Name
+                  Value: khang-LambdaCldWebApp-PublicSubnet2
+
+    # Create Public Subnet 3
+    PublicSubnet3:
+        Type: AWS::EC2::Subnet
+        Properties:
+            VpcId: !Ref MainVPC
+            AvailabilityZone: ap-southeast-2c
+            CidrBlock: 10.10.3.0/24
+            MapPublicIpOnLaunch: true
+            Tags:
+                - Key: Name
+                  Value: khang-LambdaCldWebApp-PublicSubnet3
+
+    # Create and attach Internet Gateway
+    InternetGateway:
+        Type: AWS::EC2::InternetGateway
+        Properties:
+            Tags:
+                - Key: Name
+                  Value: khang-LambdaCldWebApp-IGW
+
+    AttachIGW:
+        Type: AWS::EC2::VPCGatewayAttachment
+        Properties:
+            VpcId: !Ref MainVPC
+            InternetGatewayId: !Ref InternetGateway
+
+    # Create Public Route Table
+    PublicRouteTable:
+        Type: AWS::EC2::RouteTable
+        Properties:
+            VpcId: !Ref MainVPC
+            Tags:
+                - Key: Name
+                  Value: khang-LambdaCldWebApp-PublicRouteTable
+
+    # Create Public Route
+    PublicRoute:
+        Type: AWS::EC2::Route
+        DependsOn: AttachIGW
+        Properties:
+            RouteTableId: !Ref PublicRouteTable
+            DestinationCidrBlock: 0.0.0.0/0
+            GatewayId: !Ref InternetGateway
+
+    # Link Public Subnets to Public Route Table
+    PublicSubnet1RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+            SubnetId: !Ref PublicSubnet1
+            RouteTableId: !Ref PublicRouteTable
+
+    PublicSubnet2RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+            SubnetId: !Ref PublicSubnet2
+            RouteTableId: !Ref PublicRouteTable
+
+    PublicSubnet3RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+            SubnetId: !Ref PublicSubnet3
+            RouteTableId: !Ref PublicRouteTable
+
+    # Create Security Group
+    ALBSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            # Set name for ALB Security Group
+            GroupName: khang-LambdaCldWebApp-ALB-SG
+            GroupDescription: SG for Load Balancer to allow HTTP traffic
+            VpcId: !Ref MainVPC
+            SecurityGroupIngress:
+                - IpProtocol: tcp
+                  FromPort: 80
+                  ToPort: 80
+                  SourcePrefixListId: pl-0412d339d11f96691
+                # Open to Port 22 for SSH
+                - IpProtocol: tcp
+                  FromPort: 22
+                  ToPort: 22
+                  CidrIp: 0.0.0.0/0
+            Tags:
+                - Key: Name
+                  Value: khang-LambdaCldWebApp-ALB-SG
+
+    WebServerSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            # Set name for Web Server Security Group
+            GroupName: khang-LambdaCldWebApp-WebServer-SG
+            GroupDescription: SG for Web Server to allow HTTP traffic from ALB
+            VpcId: !Ref MainVPC
+            SecurityGroupIngress:
+                - IpProtocol: tcp
+                  FromPort: 80
+                  ToPort: 80
+                  SourceSecurityGroupId: !Ref ALBSecurityGroup
+                # Open to Port 22 for SSH to be anywhere
+                - IpProtocol: tcp
+                  FromPort: 22
+                  ToPort: 22
+                  CidrIp: 0.0.0.0/0
+            Tags:
+                - Key: Name
+                  Value: khang-LambdaCldWebApp-WebServer-SG
+
+    # Create Web Server Launch Configuration template
+    WebServerLaunchTemplate:
+        Type: AWS::EC2::LaunchTemplate
+        Properties:
+            LaunchTemplateName: khang-LambdaCldWebApp-WebServerLaunchTemplate
+            LaunchTemplateData:
+                ImageId: !Ref LatestAmiId
+                InstanceType: t3.micro
+                SecurityGroupIds:
+                    - !Ref WebServerSecurityGroup
+                KeyName: khang-keypair
+                IamInstanceProfile:
+                    Arn: arn:aws:iam::564713677658:instance-profile/Security-SSM-IAM-Instance-Role
+                UserData: !Base64
+                    Fn::Sub: |
+                        #!/bin/bash
+                        sudo yum update -y
+                        sudo yum install httpd -y
+                        sudo systemctl start httpd
+                        sudo systemctl enable httpd
+                        sudo amazon-linux-extras install epel -y
+                        sudo yum install stress -y
+                        echo "<h1>Khang's Research and Development (R&D) Area</h1>" > /var/www/html/index.html
+
+    # Create Auto Scaling Group to manage Web Server instances
+    WebServerASG:
+        Type: AWS::AutoScaling::AutoScalingGroup
+        Properties:
+            # Set name for ASG
+            AutoScalingGroupName: khang-LambdaCldWebApp-WebServerASG
+            VPCZoneIdentifier:
+                - !Ref PublicSubnet1
+                - !Ref PublicSubnet2
+                - !Ref PublicSubnet3
+            LaunchTemplate:
+                LaunchTemplateId: !Ref WebServerLaunchTemplate
+                Version: !GetAtt WebServerLaunchTemplate.LatestVersionNumber
+            MinSize: "1" # Set min size to 1 instances
+            MaxSize: "5" # Set max size to 5 instances
+            DesiredCapacity: "1" # Set desired capacity to 1 instance
+            TargetGroupARNs:
+                - !Ref ALBTargetGroup
+            MetricsCollection:
+                - Granularity: 1Minute
+                  Metrics:
+                      - GroupMinSize
+                      - GroupMaxSize
+            Tags:
+                - Key: Name
+                  Value: khang-LambdaCldWebApp-WebServerASG
+                  PropagateAtLaunch: true
+
+    # Create Application Load Balancer for Web Server
+    AppLoadBalancer:
+        Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+        Properties:
+            # Set name for ALB
+            Name: khang-LambdaCldWebApp-ALB
+            Scheme: internet-facing
+            SecurityGroups:
+                - !Ref ALBSecurityGroup
+            Subnets:
+                - !Ref PublicSubnet1
+                - !Ref PublicSubnet2
+                - !Ref PublicSubnet3
+
+    # Attention: name > 32 characters
+    # Create ALB Target Group to forward traffic to Web Server
+    ALBTargetGroup:
+        Type: AWS::ElasticLoadBalancingV2::TargetGroup
+        Properties:
+            HealthCheckPath: /
+            Name: khang-LambdaCldWebApp-ALB-TG
+            Port: 80
+            Protocol: HTTP
+            TargetType: instance
+            VpcId: !Ref MainVPC
+
+    # Create ALB Listener to forward traffic to Target Group
+    ALBListener:
+        Type: AWS::ElasticLoadBalancingV2::Listener
+        Properties:
+            DefaultActions:
+                - Type: forward
+                  TargetGroupArn: !Ref ALBTargetGroup
+            LoadBalancerArn: !Ref AppLoadBalancer
+            Port: 80
+            Protocol: HTTP
+
+    # Create Scaling Policy for Web Server ASG
+    WebServerScaleUpPolicy:
+        Type: AWS::AutoScaling::ScalingPolicy
+        Properties:
+            # Add policy name
+            PolicyName: khang-LmdaCldWebAppDB-ScaleUpPolicy
+            AdjustmentType: ChangeInCapacity
+            AutoScalingGroupName: !Ref WebServerASG
+            Cooldown: "5"
+            ScalingAdjustment: 1
+
+    CPUAlarmHigh:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            # Add alarm name
+            AlarmName: khang-LambdaCldWebApp-CPUAlarmHigh
+            AlarmDescription: Scale up one additional instance if the CPU > 50% for 10s
+            MetricName: CPUUtilization
+            # Namespace: AWS::EC2::AutoScalingGroup
+            Namespace: AWS/EC2
+            Statistic: Average
+            Period: 10
+            EvaluationPeriods: 1
+            Threshold: 50
+            AlarmActions:
+                - !Ref WebServerScaleUpPolicy
+            Dimensions:
+                - Name: AutoScalingGroupName
+                  Value: !Ref WebServerASG
+            ComparisonOperator: GreaterThanThreshold
+
+    WebServerScaleDownPolicy:
+        Type: AWS::AutoScaling::ScalingPolicy
+        Properties:
+            PolicyName: khang-LambdaCldWebApp-ScaleDownPolicy
+            AdjustmentType: ChangeInCapacity
+            AutoScalingGroupName: !Ref WebServerASG
+            Cooldown: "5"
+            ScalingAdjustment: -1
+
+    # Scale down if CPU < 30% for 2 minute
+    CPUAlarmLow:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmName: khang-LambdaCldWebApp-CPUAlarmLow
+            AlarmDescription: Scale down if CPU < 30% for 10s
+            MetricName: CPUUtilization
+            Namespace: AWS/EC2
+            Statistic: Average
+            Period: 10
+            EvaluationPeriods: 1
+            Threshold: 30
+            AlarmActions:
+                - !Ref WebServerScaleDownPolicy
+            Dimensions:
+                - Name: AutoScalingGroupName
+                  Value: !Ref WebServerASG
+            ComparisonOperator: LessThanThreshold
+
+Outputs:
+    LoadBalancerDNSName:
+        Description: The DNS name for the Application Load Balancer
+        Value: !GetAtt AppLoadBalancer.DNSName
